@@ -8,36 +8,31 @@ import random
 import threading
 import traceback
 import socket
+import http.cookiejar
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
-socket.setdefaulttimeout(15)
+socket.setdefaulttimeout(60)
 url_base = 'https://www.realtor.com'
 fake = Faker('zh_CN')
 proxy_list = [
               'NO PROXY',
-              '127.0.0.1:1080',
+              #'127.0.0.1:1080',
               '127.0.0.1:1081',
-              '127.0.0.1:1082',
+              #'127.0.0.1:1082',
               '127.0.0.1:1083',
-              '127.0.0.1:1084',
-              '127.0.0.1:1085',
+              #'127.0.0.1:1084',
+             # '127.0.0.1:1085',
               '127.0.0.1:1086',
               '127.0.0.1:1087',
               '127.0.0.1:1088',
               '127.0.0.1:1089',
               #'127.0.0.1:1090',
-              '127.0.0.1:1091']
-# USER_PROXY = 0  # 0 not use, 1 use, 2 choose randomly
-INTERVAL_SECONDS = 7.77
+              #'127.0.0.1:1091'
+              ]
 
-def get_one(data, proxy):
+
+def get_one(data, opener):
     url = '/validate_geo?location=' + data[9:] + '&prop_status=for_sale&retain_secondary_facets=true&include_zip=false&search_controller=Search%3A%3APropertiesController'
-    if proxy == 'NO PROXY':
-        proxy_handler = urllib.request.ProxyHandler()
-    else:
-        proxy_handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
-    opener = urllib.request.build_opener(proxy_handler)
-    opener.addheaders = [('User-agent', fake.user_agent())]
     req = opener.open(url_base + url).read().decode('utf-8')
     redirect_url = json.loads(req)['url']
     ret_html = opener.open(url_base + redirect_url).read().decode('utf-8')
@@ -57,8 +52,8 @@ def get_one(data, proxy):
     return sold_history
 
 
-def proxy_test():
-    for _ in proxy_list:
+def proxy_test(opener_list):
+    for _ in opener_list:
         good_proxy = False
         try:
             if get_one("20090327,2616,SHERIDAN,BLVD,0,DENVER", _):
@@ -72,50 +67,57 @@ def proxy_test():
                 print(_, 'BROKEN!')
 
 
-def thread_func(data, proxy, out_file, out_file_lock):
-    write_line = ''
-    try:
-        ret = get_one(data, proxy)
-        write_line = '\t'.join(data.split(',')) + '\t' + ('\t'.join(ret[0]) if ret else 'empty')
-    except:
-        pass
-    if not write_line:
-        write_line = '\t'.join(data.split(',')) + '\terror'
-        print('error occurred :', data)
+def thread_func(opener, job, job_lock, out_file, out_file_lock):
+    while job:
+        job_lock.acquire()
+        now = job.pop()
+        job_lock.release()
 
-    out_file_lock.acquire()
-    out_file.write(write_line + '\n')
-    out_file.flush()
-    out_file_lock.release()
+        write_line = ''
+        try:
+            ret = get_one(now, opener)
+            write_line = '\t'.join(now.split(',')) + '\t' + ('\t'.join(ret[0]) if ret else 'empty')
+        except:
+            traceback.print_exc()
+            pass
+        if not write_line:
+            write_line = '\t'.join(now.split(',')) + '\terror'
+            print('error occurred :', now)
+
+        out_file_lock.acquire()
+        out_file.write(write_line + '\n')
+        out_file.flush()
+        out_file_lock.release()
 
 if __name__ == '__main__':
-    #proxy_test()
-    #input('Continue?')
-    with open('trimmed_data.txt', 'r') as in_file:
-        all_data = in_file.readlines()
+    opener_list = []
+    for _ in proxy_list:
+        if _ == 'NO PROXY':
+            proxy_handler = urllib.request.ProxyHandler()
+        else:
+            proxy_handler = urllib.request.ProxyHandler({'http': _, 'https': _})
+        opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        opener.addheaders = [('User-agent', fake.user_agent())]
+        opener_list.append(opener)
 
-    all_data = [_.strip('\n') for _ in all_data]
+    proxy_test(opener_list)
+    input('Continue?')
+    with open('trimmed_data.txt', 'r') as in_file:
+        all_job = in_file.readlines()
+
+    all_job = reversed([_.strip('\n') for _ in all_job])
+    job_lock = threading.Lock()
 
     out_file = open('output.txt', 'a')
     out_file_lock = threading.Lock()
 
-    counter = 0
-    proxy_index = 0
-    while counter < len(all_data):
-        if threading.activeCount() > len(proxy_list):
-            time.sleep(3)
+    for _ in opener_list:
+        threading.Thread(target=thread_func, args=(_, all_job, job_lock, out_file, out_file_lock)).start()
 
-        threading.Thread(target=thread_func, args=(all_data[counter], proxy_list[proxy_index], out_file, out_file_lock)).start()
-        time.sleep(INTERVAL_SECONDS / len(proxy_list))
-        counter += 1
-        proxy_index += 1
-
-        if proxy_index == len(proxy_list):
-            proxy_index = 0
-
-        if not (counter % 20):
-            print(time.asctime(), 'COUNTER :', counter)
-
+    while all_job:
+        print(time.asctime(), 'COUNTER :', len(all_job))
+        time.sleep(20)
+            
     out_file.close()
 
 
